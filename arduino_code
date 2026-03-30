@@ -1,0 +1,33 @@
+// 4-tap FIR moving-average (notch-from-theory): y(n) = 1/4 * sum x(n-k), k=0..3
+static const int FIR_LEN = 4;
+static int fir_buf[FIR_LEN] = {0, 0, 0, 0};
+static int fir_idx = 0;
+static long fir_sum = 0;
+static int fir_count = 0;
+
+void setup() {
+  // initialize serial communication at 115200 bits per second:
+  Serial.begin(115200);
+}
+
+// the loop routine runs over and over again forever:
+void loop() {
+  // read the input on analog pin 0:
+  int sensorValue = analogRead(34); // Using the GPIO34
+
+  // Update FIR buffer and running sum
+  fir_sum -= fir_buf[fir_idx];
+  fir_buf[fir_idx] = sensorValue;
+  fir_sum += fir_buf[fir_idx];
+  fir_idx = (fir_idx + 1) % FIR_LEN;
+  if (fir_count < FIR_LEN) {
+    fir_count++;
+  }
+
+  // Compute filtered output (average of available samples)
+  float filtered = (float)fir_sum / (float)fir_count;
+
+  // print out the filtered value
+  Serial.println(filtered);
+  delay(5);  // delay in between reads for stability
+}
