@@ -1,0 +1,7 @@
+to see all data
+- python3 plot_all_data_overview.py --root data
+    or 
+- python3 plot_all_data_overview.py --root data --downsample 5 --alpha 0.2
+
+to run model
+- python3 {filename} #do it while in thesis-project directory

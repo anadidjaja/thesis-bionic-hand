@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Window-level MLP classifier with file-level aggregation.
-
-Uses 200 ms windows, 100 ms step at 1000 Hz, after trimming first 1s.
-Each window becomes a sample; windows are grouped by file for evaluation.
-"""
+"""MLP with raw per-channel normalization + windowed features."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +8,6 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from statistics import mean
 
 try:
     import numpy as np
@@ -45,8 +40,16 @@ def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
+def normalize_raw(ch_vals):
+    arr = np.asarray(ch_vals, dtype=float)
+    mu = arr.mean()
+    sigma = arr.std()
+    if sigma == 0:
+        return arr.tolist()
+    return ((arr - mu) / sigma).tolist()
+
+
 def window_features(vals):
-    # MAV, RMS, ZCR, WL, SSC for a single window
     n = len(vals)
     if n == 0:
         return None
@@ -116,6 +119,8 @@ def extract_windows(csv_path: Path):
         print(f"Skipping {csv_path}: no data after 1s trim", file=sys.stderr)
         return None
 
+    channel_values = [normalize_raw(ch) for ch in channel_values]
+
     if any(len(ch) < WINDOW_SAMPLES for ch in channel_values):
         print(f"Skipping {csv_path}: not enough samples for windowing", file=sys.stderr)
         return None
@@ -170,12 +175,12 @@ def aggregate_predictions(file_ids, pred_labels):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Window-level MLP classifier with file-level aggregation")
+    ap = argparse.ArgumentParser(description="Window-level MLP with raw normalization + file-level aggregation")
     ap.add_argument("--data", default="data", help="Training root folder")
     ap.add_argument("--validation", default="validation", help="Validation root folder")
     ap.add_argument("--test", default="test", help="Test root folder")
     ap.add_argument("--hidden", default="64,32", help="Hidden layer sizes, comma-separated")
-    ap.add_argument("--max-iter", default=1000, type=int, help="Max training iterations")
+    ap.add_argument("--max-iter", default=300, type=int, help="Max training iterations")
     ap.add_argument("--alpha", default=0.0001, type=float, help="L2 regularization")
     args = ap.parse_args()
 
