@@ -1,7 +1,9 @@
 to see all data
 - python3 plot_all_data_overview.py --root data
-    or 
-- python3 plot_all_data_overview.py --root data --downsample 5 --alpha 0.2
+- to see something more spesific:
+    - python3 plot_all_data_overview.py --root data --{CH#} --{action}
+        action: fist, point, open, pen, rest
+        CH: channel (1,2,3,4)
 
 to run model
 - python3 {filename} #do it while in thesis-project directory
