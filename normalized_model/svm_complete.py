@@ -22,7 +22,7 @@ try:
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
     from sklearn.svm import SVC
-    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 except Exception as e:  # pragma: no cover
     print("Missing dependency: scikit-learn. Install with: pip install scikit-learn", file=sys.stderr)
     print(f"Import error: {e}", file=sys.stderr)
@@ -215,14 +215,18 @@ def main():
     def evaluate(name, X, y):
         pred = model.predict(X)
         acc = accuracy_score(y, pred)
+        p, r, f1, _ = precision_recall_fscore_support(y, pred, average="macro", zero_division=0)
         pred_counts = Counter(pred)
         true_counts = Counter(y)
         print(f"\n{name} accuracy: {acc:.4f}")
+        print(f"{name} macro P/R/F1: {p:.4f} / {r:.4f} / {f1:.4f}")
         print(f"{name} prediction counts:")
         for label in sorted(set(list(true_counts.keys()) + list(pred_counts.keys()))):
             print(f"  {label}: predicted={pred_counts.get(label, 0)} true={true_counts.get(label, 0)}")
         print(f"{name} confusion matrix:")
-        print(confusion_matrix(y, pred))
+        labels = sorted(set(y + list(pred)))
+        print(f"Labels (rows=true, cols=pred): {labels}")
+        print(confusion_matrix(y, pred, labels=labels))
         print(f"{name} classification report:")
         print(classification_report(y, pred))
 

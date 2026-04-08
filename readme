@@ -7,3 +7,14 @@ to see all data
 
 to run model
 - python3 {filename} #do it while in thesis-project directory
+
+to run summarize csv stats
+- python3 summarize_csv_stats.py data --by-class
+
+plot pca (svm)
+- python3 plot_svm_pca.py --mode simple --data data --validation validation --test test (raw svm)
+- python3 plot_svm_pca.py --mode complete_norm --data data --validation validation --test test (complete svm)
+
+plot nn
+- python3 plot_nn_mlp.py --mode simple_notnorm --data data (raw nn)
+- python3 plot_nn_mlp.py --mode complete_norm --data data (complete nn)

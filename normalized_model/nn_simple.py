@@ -19,7 +19,7 @@ except Exception as e:  # pragma: no cover
 try:
     from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 except Exception as e:  # pragma: no cover
     print("Missing dependency: scikit-learn. Install with: pip install scikit-learn", file=sys.stderr)
     print(f"Import error: {e}", file=sys.stderr)
@@ -193,9 +193,15 @@ def main():
         y_file_true = [file_true[fid] for fid in sorted(file_pred.keys())]
         y_file_pred = [file_pred[fid] for fid in sorted(file_pred.keys())]
         acc = accuracy_score(y_file_true, y_file_pred)
+        p, r, f1, _ = precision_recall_fscore_support(
+            y_file_true, y_file_pred, average="macro", zero_division=0
+        )
         print(f"\n{name} file-level accuracy: {acc:.4f}")
+        print(f"{name} file-level macro P/R/F1: {p:.4f} / {r:.4f} / {f1:.4f}")
         print(f"{name} confusion matrix (file-level):")
-        print(confusion_matrix(y_file_true, y_file_pred))
+        labels = sorted(set(y_file_true + y_file_pred))
+        print(f"Labels (rows=true, cols=pred): {labels}")
+        print(confusion_matrix(y_file_true, y_file_pred, labels=labels))
         print(f"{name} classification report (file-level):")
         print(classification_report(y_file_true, y_file_pred))
 
