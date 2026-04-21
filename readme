@@ -6,7 +6,10 @@ to see all data
         CH: channel (1,2,3,4)
 
 to run model
-- python3 {filename} #do it while in thesis-project directory
+  python3 {filename} #do it while in thesis-project directory
+  python3 model/nn_complete.py --features mav rms
+  python3 model/svm_complete.py --features zcr wl ssc
+  python3 model/nn_complete.py --ma --smooth --features mav rms zcr
 
 to run summarize csv stats
 - python3 summarize_csv_stats.py data --by-class
@@ -18,3 +21,23 @@ plot pca (svm)
 plot nn
 - python3 plot_nn_mlp.py --mode simple_notnorm --data data (raw nn)
 - python3 plot_nn_mlp.py --mode complete_norm --data data (complete nn)
+
+
+feature correlation:
+    python3 plot_feature_correlation.py --root data
+
+    python3 plot_feature_correlation.py --root data --mode simple_raw
+    python3 plot_feature_correlation.py --root data --mode simple_norm
+    python3 plot_feature_correlation.py --root data --mode complete_raw_notch
+    python3 plot_feature_correlation.py --root data --mode complete_norm_notch
+
+synthetic data:
+    python3 generate_synthetic_data.py --source data --output synthetic_data --copies 5
+    Only specific classes:
+    python3 generate_synthetic_data.py --source data --output synthetic_data --classes fist open
+    Tuning knobs:
+    - --scale-min / --scale-max
+    - --noise-ratio
+    - --bias-ratio
+    - --seed
+    example: python3 generate_synthetic_data.py --source data --output data_aug --copies 1 --scale-min 0.99 --scale-max 1.01 --noise-ratio 0.005 --bias-ratio 0.003
