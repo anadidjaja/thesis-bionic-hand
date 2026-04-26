@@ -1,9 +1,12 @@
-to see all data
+to see all data and mean
 - python3 plot_all_data_overview.py --root data
+- python3 plot_all_data_mean.py --root data
 - to see something more spesific:
     - python3 plot_all_data_overview.py --root data --{CH#} --{action}
         action: fist, point, open, pen, rest
         CH: channel (1,2,3,4)
+    - python3 plot_all_data_mean.py --root data --{CH#} --{action}
+    
 
 to run model
   python3 {filename} #do it while in thesis-project directory

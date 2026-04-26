@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MLP with raw per-channel normalization + windowed features."""
+"""MLP with raw per-channel normalization + selectable per-channel features."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ import csv
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from itertools import combinations
 from pathlib import Path
 
 try:
@@ -24,6 +25,13 @@ except Exception as e:  # pragma: no cover
     sys.exit(1)
 
 try:
+    from scipy.stats import f_oneway, ttest_ind
+except Exception as e:  # pragma: no cover
+    print("Missing dependency: scipy. Install with: pip install scipy", file=sys.stderr)
+    print(f"Import error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+try:
     from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
@@ -36,11 +44,6 @@ except Exception as e:  # pragma: no cover
 CHANNELS = ["CH1", "CH2", "CH3", "CH4"]
 TIMESTAMP_COL = "timestamp"
 CUT_SECONDS = 1.0
-SAMPLE_RATE_HZ = 1000
-WINDOW_MS = 200
-STEP_MS = 100
-WINDOW_SAMPLES = int(SAMPLE_RATE_HZ * WINDOW_MS / 1000)
-STEP_SAMPLES = max(1, int(SAMPLE_RATE_HZ * STEP_MS / 1000))
 MA_WINDOW = 5
 SMOOTH_ALPHA = 0.2
 FEATURE_NAMES = ["mav", "rms", "zcr", "wl", "ssc"]
@@ -86,7 +89,7 @@ def preprocess_channel(ch_vals, use_ma, use_smooth):
     return processed
 
 
-def window_features(vals, selected_features):
+def channel_features(vals, selected_features):
     n = len(vals)
     if n == 0:
         return None
@@ -117,7 +120,11 @@ def window_features(vals, selected_features):
     return [metric_map[name] for name in selected_features]
 
 
-def extract_windows(csv_path: Path, use_ma: bool, use_smooth: bool, selected_features):
+def build_feature_names(selected_features):
+    return [f"{ch}_{feat}" for ch in CHANNELS for feat in selected_features]
+
+
+def extract_features(csv_path: Path, use_ma: bool, use_smooth: bool, selected_features):
     with csv_path.open("r", newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
@@ -166,46 +173,30 @@ def extract_windows(csv_path: Path, use_ma: bool, use_smooth: bool, selected_fea
     channel_values = [preprocess_channel(ch, use_ma, use_smooth) for ch in channel_values]
     channel_values = [normalize_raw(ch) for ch in channel_values]
 
-    if any(len(ch) < WINDOW_SAMPLES for ch in channel_values):
-        print(f"Skipping {csv_path}: not enough samples for windowing", file=sys.stderr)
-        return None
+    features = []
+    for ch_vals in channel_values:
+        feats = channel_features(ch_vals, selected_features)
+        if feats is None:
+            print(f"Skipping {csv_path}: empty channel after preprocessing", file=sys.stderr)
+            return None
+        features.extend(feats)
 
-    windows = []
-    for start in range(0, len(channel_values[0]) - WINDOW_SAMPLES + 1, STEP_SAMPLES):
-        feats = []
-        for ch_vals in channel_values:
-            window = ch_vals[start:start + WINDOW_SAMPLES]
-            wf = window_features(window, selected_features)
-            if wf is None:
-                feats = None
-                break
-            feats.extend(wf)
-        if feats is not None:
-            windows.append(feats)
-
-    if not windows:
-        print(f"Skipping {csv_path}: no windows after trim", file=sys.stderr)
-        return None
-
-    return windows
+    return features
 
 
 def load_split(split_dir: Path, use_ma: bool, use_smooth: bool, selected_features):
     X, y, file_ids = [], [], []
-    file_to_label = {}
     for class_dir in sorted([p for p in split_dir.iterdir() if p.is_dir()]):
         label = class_dir.name
         for csv_path in sorted(class_dir.glob("*.csv")):
-            windows = extract_windows(csv_path, use_ma, use_smooth, selected_features)
-            if windows is None:
+            feat = extract_features(csv_path, use_ma, use_smooth, selected_features)
+            if feat is None:
                 continue
             file_id = str(csv_path)
-            file_to_label[file_id] = label
-            for w in windows:
-                X.append(w)
-                y.append(label)
-                file_ids.append(file_id)
-    return X, y, file_ids, file_to_label
+            X.append(feat)
+            y.append(label)
+            file_ids.append(file_id)
+    return X, y, file_ids
 
 
 def aggregate_predictions(file_ids, pred_labels):
@@ -217,6 +208,32 @@ def aggregate_predictions(file_ids, pred_labels):
         most_common = Counter(preds).most_common(1)[0][0]
         file_pred[fid] = most_common
     return file_pred
+
+
+def run_anova_and_posthoc(X, y, feature_names, alpha=0.05):
+    X_arr = np.asarray(X, dtype=float)
+    y_arr = np.asarray(y)
+    class_labels = sorted(set(y_arr.tolist()))
+    print("\nANOVA results (training set):")
+    for idx, feat_name in enumerate(feature_names):
+        groups = [X_arr[y_arr == label, idx] for label in class_labels]
+        if any(len(group) < 2 for group in groups):
+            print(f"  {feat_name}: skipped (insufficient samples)")
+            continue
+        stat, p_value = f_oneway(*groups)
+        print(f"  {feat_name}: F={stat:.4f}, p={p_value:.6g}")
+        if p_value < alpha:
+            print("    Post-hoc (Welch t-test, Bonferroni corrected):")
+            comparisons = list(combinations(class_labels, 2))
+            for left, right in comparisons:
+                left_vals = X_arr[y_arr == left, idx]
+                right_vals = X_arr[y_arr == right, idx]
+                if len(left_vals) < 2 or len(right_vals) < 2:
+                    continue
+                t_stat, pair_p = ttest_ind(left_vals, right_vals, equal_var=False, nan_policy="omit")
+                adj_p = min(pair_p * len(comparisons), 1.0)
+                if adj_p < alpha:
+                    print(f"      {left} vs {right}: t={t_stat:.4f}, p_adj={adj_p:.6g}")
 
 
 def plot_confusion_heatmap(cm, labels, title):
@@ -252,7 +269,7 @@ def main():
         nargs="*",
         choices=FEATURE_NAMES,
         default=None,
-        help="Selected window features. Default uses all: mav rms zcr wl ssc",
+        help="Selected per-channel features. Default uses all: mav rms zcr wl ssc",
     )
     args = ap.parse_args()
 
@@ -267,13 +284,16 @@ def main():
             print(f"Missing directory: {d}", file=sys.stderr)
             sys.exit(1)
 
-    X_train, y_train, _, _ = load_split(data_dir, args.ma, args.smooth, selected_features)
-    X_val, y_val, val_file_ids, val_file_labels = load_split(val_dir, args.ma, args.smooth, selected_features)
-    X_test, y_test, test_file_ids, test_file_labels = load_split(test_dir, args.ma, args.smooth, selected_features)
+    X_train, y_train, _ = load_split(data_dir, args.ma, args.smooth, selected_features)
+    X_val, y_val, val_file_ids = load_split(val_dir, args.ma, args.smooth, selected_features)
+    X_test, y_test, test_file_ids = load_split(test_dir, args.ma, args.smooth, selected_features)
 
     if not X_train or not X_val or not X_test:
         print("One or more splits have no usable samples after trimming.", file=sys.stderr)
         sys.exit(1)
+
+    feature_names = build_feature_names(selected_features)
+    run_anova_and_posthoc(X_train, y_train, feature_names)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
@@ -291,27 +311,21 @@ def main():
 
     def evaluate(name, X, y, file_ids, file_labels):
         pred = model.predict(X)
-        file_pred = aggregate_predictions(file_ids, pred)
-        file_true = {fid: file_labels[fid] for fid in file_pred.keys()}
-        y_file_true = [file_true[fid] for fid in sorted(file_pred.keys())]
-        y_file_pred = [file_pred[fid] for fid in sorted(file_pred.keys())]
-        acc = accuracy_score(y_file_true, y_file_pred)
-        p, r, f1, _ = precision_recall_fscore_support(
-            y_file_true, y_file_pred, average="macro", zero_division=0
-        )
-        print(f"\n{name} file-level accuracy: {acc:.4f}")
-        print(f"{name} file-level macro P/R/F1: {p:.4f} / {r:.4f} / {f1:.4f}")
-        print(f"{name} confusion matrix (file-level):")
-        labels = sorted(set(y_file_true + y_file_pred))
+        acc = accuracy_score(y, pred)
+        p, r, f1, _ = precision_recall_fscore_support(y, pred, average="macro", zero_division=0)
+        print(f"\n{name} accuracy: {acc:.4f}")
+        print(f"{name} macro P/R/F1: {p:.4f} / {r:.4f} / {f1:.4f}")
+        print(f"{name} confusion matrix:")
+        labels = sorted(set(y + list(pred)))
         print(f"Labels (rows=true, cols=pred): {labels}")
-        cm = confusion_matrix(y_file_true, y_file_pred, labels=labels)
+        cm = confusion_matrix(y, pred, labels=labels)
         print(cm)
-        plot_confusion_heatmap(cm, labels, f"{name} confusion matrix (file-level)")
-        print(f"{name} classification report (file-level):")
-        print(classification_report(y_file_true, y_file_pred))
+        plot_confusion_heatmap(cm, labels, f"{name} confusion matrix")
+        print(f"{name} classification report:")
+        print(classification_report(y, pred, zero_division=0))
 
-    evaluate("Validation", X_val, y_val, val_file_ids, val_file_labels)
-    evaluate("Test", X_test, y_test, test_file_ids, test_file_labels)
+    evaluate("Validation", X_val, y_val, val_file_ids, "val_file_labels")
+    evaluate("Test", X_test, y_test, test_file_ids, "test_file_labels")
 
 
 if __name__ == "__main__":

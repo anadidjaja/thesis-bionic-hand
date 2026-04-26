@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Overview plot: all CSVs in data/ grouped by class and channel."""
+"""Overview plot of per-CSV means, optionally computed over fixed time windows."""
 from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 
@@ -55,16 +55,48 @@ def load_csv(path: Path, downsample: int, channels):
                     series[ch].append(float("nan"))
     if not times:
         return None
-    t0 = times[0]
-    t_sec = [(t - t0).total_seconds() for t in times]
-    return t_sec, series
+    return times, series
+
+
+def mean_ignore_nan(values):
+    finite = [v for v in values if v == v]
+    if not finite:
+        return float("nan")
+    return sum(finite) / len(finite)
+
+
+def windowed_means(times, series, window_seconds):
+    if window_seconds is None:
+        return [0.0], {ch: [mean_ignore_nan(series[ch])] for ch in CHANNELS}
+
+    start = times[0]
+    end = times[-1]
+    window = timedelta(seconds=window_seconds)
+
+    x_vals = []
+    windowed = {ch: [] for ch in CHANNELS}
+    cur = start
+    while cur <= end:
+        nxt = cur + window
+        window_idx = [i for i, t in enumerate(times) if cur <= t < nxt]
+        if window_idx:
+            x_vals.append((cur - start).total_seconds())
+            for ch in CHANNELS:
+                vals = [series[ch][i] for i in window_idx]
+                windowed[ch].append(mean_ignore_nan(vals))
+        cur = nxt
+
+    if not x_vals:
+        return [0.0], {ch: [mean_ignore_nan(series[ch])] for ch in CHANNELS}
+    return x_vals, windowed
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Plot all CSVs in a folder hierarchy")
+    ap = argparse.ArgumentParser(description="Plot per-CSV mean values in a folder hierarchy")
     ap.add_argument("--root", default="data", help="Root folder containing class subfolders")
     ap.add_argument("--downsample", type=int, default=1, help="Keep every Nth sample")
     ap.add_argument("--alpha", type=float, default=0.25, help="Line transparency")
+    ap.add_argument("--seconds", type=float, default=None, help="Mean over fixed windows of N seconds")
     # Optional filters
     for ch in CHANNELS:
         ap.add_argument(f"--{ch}", action="store_true", help=f"Show only {ch}")
@@ -110,7 +142,6 @@ def main():
     n_rows = len(class_dirs)
     n_cols = len(selected_channels)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 2.2 * n_rows), sharex=False)
-    # Normalize axes indexing to 2D list-like access
     if n_rows == 1 and n_cols == 1:
         axes = [[axes]]
     elif n_rows == 1:
@@ -127,16 +158,20 @@ def main():
             loaded = load_csv(csv_path, args.downsample, selected_channels)
             if loaded is None:
                 continue
-            t_sec, channels = loaded
+            times, channels = loaded
+            x_vals, windowed = windowed_means(times, channels, args.seconds)
             for c, ch in enumerate(selected_channels):
                 ax = axes[r][c]
-                y = channels[ch]
+                y = windowed[ch]
                 finite_vals = [v for v in y if v == v]
                 if finite_vals:
                     local_max = max(finite_vals)
                     if global_y_max is None or local_max > global_y_max:
                         global_y_max = local_max
-                ax.plot(t_sec, y, alpha=args.alpha, linewidth=0.8)
+                if args.seconds is None:
+                    ax.scatter([0.0], y, alpha=args.alpha, s=18)
+                else:
+                    ax.plot(x_vals, y, alpha=args.alpha, linewidth=0.8)
         for c, ch in enumerate(selected_channels):
             ax = axes[r][c]
             if r == 0:
@@ -144,7 +179,9 @@ def main():
             if c == 0:
                 ax.set_ylabel(class_dir.name)
             if r == n_rows - 1:
-                ax.set_xlabel("Time (s)")
+                ax.set_xlabel("Time (s)" if args.seconds is not None else "CSV mean")
+            if args.seconds is None:
+                ax.set_xlim(-0.5, 0.5)
 
     if global_y_max is not None:
         for row in axes:
@@ -152,7 +189,13 @@ def main():
                 ymin, _ = ax.get_ylim()
                 ax.set_ylim(ymin, global_y_max)
 
-    fig.suptitle(f"All CSVs in {root} (per class, per channel)", y=0.995)
+    if args.seconds is None:
+        fig.suptitle(f"Per-CSV mean in {root} (per class, per channel)", y=0.995)
+    else:
+        fig.suptitle(
+            f"Windowed mean every {args.seconds:g} s in {root} (per class, per channel)",
+            y=0.995,
+        )
     fig.tight_layout()
     plt.show()
 
