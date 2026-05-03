@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SVM with raw per-channel normalization + 50 Hz notch + selectable per-channel features."""
+"""Random Forest with raw per-channel normalization + selectable per-channel features."""
 from __future__ import annotations
 
 import argparse
@@ -9,13 +9,11 @@ from collections import Counter
 from datetime import datetime, timedelta
 from itertools import combinations
 from pathlib import Path
-from statistics import mean, pstdev
 
 try:
     import numpy as np
-    from scipy.signal import iirnotch, filtfilt
 except Exception as e:  # pragma: no cover
-    print("Missing dependency: scipy/numpy. Install with: pip install scipy numpy", file=sys.stderr)
+    print("Missing dependency: numpy. Install with: pip install numpy", file=sys.stderr)
     print(f"Import error: {e}", file=sys.stderr)
     sys.exit(1)
 
@@ -34,9 +32,7 @@ except Exception as e:  # pragma: no cover
     sys.exit(1)
 
 try:
-    from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.svm import SVC
+    from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 except Exception as e:  # pragma: no cover
     print("Missing dependency: scikit-learn. Install with: pip install scikit-learn", file=sys.stderr)
@@ -47,25 +43,14 @@ except Exception as e:  # pragma: no cover
 CHANNELS = ["CH1", "CH2", "CH3", "CH4"]
 TIMESTAMP_COL = "timestamp"
 CUT_SECONDS = 1.0
-SAMPLE_RATE_HZ = 1000
 MA_WINDOW = 5
 SMOOTH_ALPHA = 0.2
 FEATURE_NAMES = ["mav", "rms", "zcr", "wl", "ssc"]
 ALL_FEATURE_KEYS = [f"{ch}_{feat.upper()}" for ch in CHANNELS for feat in FEATURE_NAMES]
 
-NOTCH_HZ = 50.0
-NOTCH_Q = 30.0
-
 
 def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
-
-
-def apply_notch(signal_vals):
-    if len(signal_vals) < 3:
-        return signal_vals
-    b, a = iirnotch(w0=NOTCH_HZ, Q=NOTCH_Q, fs=SAMPLE_RATE_HZ)
-    return filtfilt(b, a, signal_vals)
 
 
 def normalize_raw(ch_vals):
@@ -212,14 +197,6 @@ def extract_features(csv_path: Path, use_ma: bool, use_smooth: bool, selected_fe
     channel_values = [preprocess_channel(ch, use_ma, use_smooth) for ch in channel_values]
     channel_values = [normalize_raw(ch) for ch in channel_values]
 
-    # Notch filter per channel
-    filtered = []
-    for ch_vals in channel_values:
-        arr = np.asarray(ch_vals, dtype=float)
-        arr_f = apply_notch(arr)
-        filtered.append(arr_f.tolist())
-    channel_values = filtered
-
     feature_maps = {}
     for ch_name, ch_vals in zip(CHANNELS, channel_values):
         feats = channel_features(ch_vals, FEATURE_NAMES)
@@ -311,12 +288,14 @@ def run_anova_and_posthoc(X, y, feature_names, alpha=0.05):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="SVM with raw normalization + notch + windowed features")
+    ap = argparse.ArgumentParser(description="Random Forest with raw normalization + windowed features")
     ap.add_argument("--data", default="data", help="Training root folder")
     ap.add_argument("--validation", default="validation", help="Validation root folder")
     ap.add_argument("--test", default="test", help="Test root folder")
-    ap.add_argument("--kernel", default="rbf", choices=["linear", "rbf", "poly", "sigmoid"], help="SVM kernel")
-    ap.add_argument("--C", default=1.0, type=float, help="SVM C parameter")
+    ap.add_argument("--n-estimators", default=300, type=int, help="Number of trees")
+    ap.add_argument("--max-depth", default=None, type=int, help="Max tree depth")
+    ap.add_argument("--min-samples-split", default=2, type=int, help="Min samples to split")
+    ap.add_argument("--min-samples-leaf", default=1, type=int, help="Min samples in leaf")
     ap.add_argument("--ma", action="store_true", help="Apply moving average before feature extraction")
     ap.add_argument("--smooth", action="store_true", help="Apply exponential smoothing before feature extraction")
     ap.add_argument(
@@ -350,13 +329,16 @@ def main():
         print("One or more splits have no usable samples after trimming.", file=sys.stderr)
         sys.exit(1)
 
-    feature_names = selected_feature_keys
-    run_anova_and_posthoc(X_train, y_train, feature_names)
+    run_anova_and_posthoc(X_train, y_train, selected_feature_keys)
 
-    model = Pipeline([
-        ("scaler", StandardScaler()),
-        ("svm", SVC(kernel=args.kernel, C=args.C)),
-    ])
+    model = RandomForestClassifier(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        min_samples_split=args.min_samples_split,
+        min_samples_leaf=args.min_samples_leaf,
+        random_state=42,
+        n_jobs=-1,
+    )
     model.fit(X_train, y_train)
 
     def evaluate(name, X, y):

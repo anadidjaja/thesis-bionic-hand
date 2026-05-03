@@ -34,7 +34,7 @@ except Exception as e:  # pragma: no cover
 try:
     from sklearn.neural_network import MLPClassifier
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
+    from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 except Exception as e:  # pragma: no cover
     print("Missing dependency: scikit-learn. Install with: pip install scikit-learn", file=sys.stderr)
     print(f"Import error: {e}", file=sys.stderr)
@@ -47,6 +47,7 @@ CUT_SECONDS = 1.0
 MA_WINDOW = 5
 SMOOTH_ALPHA = 0.2
 FEATURE_NAMES = ["mav", "rms", "zcr", "wl", "ssc"]
+ALL_FEATURE_KEYS = [f"{ch}_{feat.upper()}" for ch in CHANNELS for feat in FEATURE_NAMES]
 
 
 def parse_iso(ts: str) -> datetime:
@@ -120,11 +121,35 @@ def channel_features(vals, selected_features):
     return [metric_map[name] for name in selected_features]
 
 
-def build_feature_names(selected_features):
-    return [f"{ch}_{feat}" for ch in CHANNELS for feat in selected_features]
+def normalize_feature_key(feature_key: str):
+    key = feature_key.strip().upper()
+    parts = key.split("_", 1)
+    if len(parts) != 2:
+        return None
+    ch, feat = parts
+    if ch not in CHANNELS:
+        return None
+    if feat.lower() not in FEATURE_NAMES:
+        return None
+    return f"{ch}_{feat}"
 
 
-def extract_features(csv_path: Path, use_ma: bool, use_smooth: bool, selected_features):
+def parse_selected_feature_keys(raw_features):
+    if not raw_features:
+        return ALL_FEATURE_KEYS
+    out = []
+    seen = set()
+    for raw in raw_features:
+        norm = normalize_feature_key(raw)
+        if norm is None:
+            raise ValueError(f"Invalid feature '{raw}'. Use CH[1-4]_[MAV|RMS|ZCR|WL|SSC].")
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def extract_features(csv_path: Path, use_ma: bool, use_smooth: bool, selected_feature_keys):
     with csv_path.open("r", newline="") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
@@ -173,23 +198,29 @@ def extract_features(csv_path: Path, use_ma: bool, use_smooth: bool, selected_fe
     channel_values = [preprocess_channel(ch, use_ma, use_smooth) for ch in channel_values]
     channel_values = [normalize_raw(ch) for ch in channel_values]
 
-    features = []
-    for ch_vals in channel_values:
-        feats = channel_features(ch_vals, selected_features)
+    feature_maps = {}
+    for ch_name, ch_vals in zip(CHANNELS, channel_values):
+        feats = channel_features(ch_vals, FEATURE_NAMES)
         if feats is None:
             print(f"Skipping {csv_path}: empty channel after preprocessing", file=sys.stderr)
             return None
-        features.extend(feats)
+        metric_map = {name.upper(): value for name, value in zip(FEATURE_NAMES, feats)}
+        feature_maps[ch_name] = metric_map
+
+    features = []
+    for key in selected_feature_keys:
+        ch, feat = key.split("_", 1)
+        features.append(feature_maps[ch][feat])
 
     return features
 
 
-def load_split(split_dir: Path, use_ma: bool, use_smooth: bool, selected_features):
+def load_split(split_dir: Path, use_ma: bool, use_smooth: bool, selected_feature_keys):
     X, y, file_ids = [], [], []
     for class_dir in sorted([p for p in split_dir.iterdir() if p.is_dir()]):
         label = class_dir.name
         for csv_path in sorted(class_dir.glob("*.csv")):
-            feat = extract_features(csv_path, use_ma, use_smooth, selected_features)
+            feat = extract_features(csv_path, use_ma, use_smooth, selected_feature_keys)
             if feat is None:
                 continue
             file_id = str(csv_path)
@@ -214,6 +245,10 @@ def run_anova_and_posthoc(X, y, feature_names, alpha=0.05):
     X_arr = np.asarray(X, dtype=float)
     y_arr = np.asarray(y)
     class_labels = sorted(set(y_arr.tolist()))
+    comparisons = list(combinations(class_labels, 2))
+    anova_pvals = np.full(len(feature_names), np.nan, dtype=float)
+    posthoc_adj_p = np.full((len(comparisons), len(feature_names)), np.nan, dtype=float)
+
     print("\nANOVA results (training set):")
     for idx, feat_name in enumerate(feature_names):
         groups = [X_arr[y_arr == label, idx] for label in class_labels]
@@ -221,35 +256,47 @@ def run_anova_and_posthoc(X, y, feature_names, alpha=0.05):
             print(f"  {feat_name}: skipped (insufficient samples)")
             continue
         stat, p_value = f_oneway(*groups)
+        anova_pvals[idx] = p_value
         print(f"  {feat_name}: F={stat:.4f}, p={p_value:.6g}")
         if p_value < alpha:
             print("    Post-hoc (Welch t-test, Bonferroni corrected):")
-            comparisons = list(combinations(class_labels, 2))
-            for left, right in comparisons:
+            for pair_idx, (left, right) in enumerate(comparisons):
                 left_vals = X_arr[y_arr == left, idx]
                 right_vals = X_arr[y_arr == right, idx]
                 if len(left_vals) < 2 or len(right_vals) < 2:
                     continue
                 t_stat, pair_p = ttest_ind(left_vals, right_vals, equal_var=False, nan_policy="omit")
                 adj_p = min(pair_p * len(comparisons), 1.0)
+                posthoc_adj_p[pair_idx, idx] = adj_p
                 if adj_p < alpha:
                     print(f"      {left} vs {right}: t={t_stat:.4f}, p_adj={adj_p:.6g}")
 
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(max(10, 0.55 * len(feature_names)), max(6, 1.2 * max(1, len(comparisons))))
+    )
+    eps = 1e-12
 
-def plot_confusion_heatmap(cm, labels, title):
-    fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cm, cmap="Blues")
-    ax.set_title(title)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_xticks(range(len(labels)))
-    ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yticklabels(labels)
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            ax.text(j, i, int(cm[i, j]), ha="center", va="center", color="black")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    anova_map = -np.log10(np.clip(anova_pvals, eps, 1.0))[np.newaxis, :]
+    im1 = ax1.imshow(anova_map, aspect="auto", cmap="viridis")
+    ax1.set_title("ANOVA significance (-log10 p)")
+    ax1.set_yticks([0])
+    ax1.set_yticklabels(["all classes"])
+    ax1.set_xticks(range(len(feature_names)))
+    ax1.set_xticklabels(feature_names, rotation=70, ha="right")
+    fig.colorbar(im1, ax=ax1, fraction=0.025, pad=0.02)
+
+    if len(comparisons) > 0:
+        posthoc_map = -np.log10(np.clip(posthoc_adj_p, eps, 1.0))
+        im2 = ax2.imshow(posthoc_map, aspect="auto", cmap="magma")
+        ax2.set_title("Post-hoc significance (Welch + Bonferroni, -log10 p_adj)")
+        ax2.set_yticks(range(len(comparisons)))
+        ax2.set_yticklabels([f"{a} vs {b}" for a, b in comparisons])
+        ax2.set_xticks(range(len(feature_names)))
+        ax2.set_xticklabels(feature_names, rotation=70, ha="right")
+        fig.colorbar(im2, ax=ax2, fraction=0.025, pad=0.02)
+    else:
+        ax2.axis("off")
+
     fig.tight_layout()
     plt.show()
 
@@ -267,13 +314,16 @@ def main():
     ap.add_argument(
         "--features",
         nargs="*",
-        choices=FEATURE_NAMES,
         default=None,
-        help="Selected per-channel features. Default uses all: mav rms zcr wl ssc",
+        help="Selected channel-features, e.g. CH1_MAV CH4_SSC. Default uses all channel-feature pairs.",
     )
     args = ap.parse_args()
 
-    selected_features = args.features if args.features else FEATURE_NAMES
+    try:
+        selected_feature_keys = parse_selected_feature_keys(args.features)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
     data_dir = Path(args.data)
     val_dir = Path(args.validation)
@@ -284,15 +334,15 @@ def main():
             print(f"Missing directory: {d}", file=sys.stderr)
             sys.exit(1)
 
-    X_train, y_train, _ = load_split(data_dir, args.ma, args.smooth, selected_features)
-    X_val, y_val, val_file_ids = load_split(val_dir, args.ma, args.smooth, selected_features)
-    X_test, y_test, test_file_ids = load_split(test_dir, args.ma, args.smooth, selected_features)
+    X_train, y_train, _ = load_split(data_dir, args.ma, args.smooth, selected_feature_keys)
+    X_val, y_val, val_file_ids = load_split(val_dir, args.ma, args.smooth, selected_feature_keys)
+    X_test, y_test, test_file_ids = load_split(test_dir, args.ma, args.smooth, selected_feature_keys)
 
     if not X_train or not X_val or not X_test:
         print("One or more splits have no usable samples after trimming.", file=sys.stderr)
         sys.exit(1)
 
-    feature_names = build_feature_names(selected_features)
+    feature_names = selected_feature_keys
     run_anova_and_posthoc(X_train, y_train, feature_names)
 
     scaler = StandardScaler()
@@ -315,12 +365,6 @@ def main():
         p, r, f1, _ = precision_recall_fscore_support(y, pred, average="macro", zero_division=0)
         print(f"\n{name} accuracy: {acc:.4f}")
         print(f"{name} macro P/R/F1: {p:.4f} / {r:.4f} / {f1:.4f}")
-        print(f"{name} confusion matrix:")
-        labels = sorted(set(y + list(pred)))
-        print(f"Labels (rows=true, cols=pred): {labels}")
-        cm = confusion_matrix(y, pred, labels=labels)
-        print(cm)
-        plot_confusion_heatmap(cm, labels, f"{name} confusion matrix")
         print(f"{name} classification report:")
         print(classification_report(y, pred, zero_division=0))
 
